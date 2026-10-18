@@ -43,7 +43,7 @@ SELECT
   (random() * 100000)::int AS client_id,
   now() - (random() * interval '730 days') AS date_commande,
   (random() * 500)::numeric(10,2) AS montant,
-  (ARRAY['nouvelle','payee','expediee','annulee'])[1 + (random()*3)::int] AS statut
+  (ARRAY['nouvelle','payee','expediee','annulee'])[1 + floor(random()*4)::int] AS statut
 FROM generate_series(1, 5000000) g;
 
 ANALYZE commandes;
@@ -169,7 +169,43 @@ SELECT * FROM commandes WHERE client_id = 4242;
 
 ---
 
-## 8. Règles d'or
+## 8. Journal de bord
+
+Un dossier par jour (`JOUR1/`, `JOUR2/`, …) avec la phrase du carnet.
+
+### Semaine 1
+
+- [x] **Jour 1** : mise en place (Docker + 5 M de lignes), ordre logique d'exécution d'un `SELECT` → [`JOUR1/phrase-du-jour.md`](JOUR1/phrase-du-jour.md)
+- [ ] **Jour 2**
+- [ ] **Jour 3**
+- [ ] **Jour 4**
+- [ ] **Jour 5**
+- [ ] **Samedi** : quiz + mini-défi
+
+---
+
+## 9. Notions avancées (au fil des jours)
+
+Pièges et nuances rencontrés en pratique. Chaque entrée indique le jour où elle est apparue.
+
+### Jour 1 : ordre d'exécution d'un `SELECT`
+
+```
+FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT
+```
+
+- **Un alias du `SELECT` n'existe pas dans `WHERE`**, mais existe dans `ORDER BY`. Solutions : répéter l'expression, sous-requête / CTE, ou `LATERAL`.
+- **`WHERE` filtre des lignes, `HAVING` des groupes.** Filtrer dans `WHERE` plutôt que dans `HAVING` évite de grouper des lignes inutiles.
+- **Ordre logique, pas physique** : l'optimiseur peut réorganiser le travail tant que le résultat est identique à celui de l'ordre logique.
+- **Extension PostgreSQL** : `GROUP BY` accepte un alias du `SELECT`, ce qui n'est pas du SQL standard.
+- **Un plan `EXPLAIN` se lit de bas en haut** (la ligne la plus indentée s'exécute en premier).
+- **Prédicat sargable (aperçu de la S9)** : `WHERE montant > 500 / 1.2` laisse la colonne « nue » et permet un index, contrairement à `WHERE montant * 1.2 > 500`.
+- **`::int` arrondit, il ne tronque pas** (`0.5::int` donne 1). Pour tirer un entier uniforme entre 0 et N-1 : `floor(random() * N)::int`. Avec `(random() * N)::int`, les valeurs extrêmes sortent deux fois moins souvent.
+- **Un jeu de test biaisé donne des conclusions biaisées** : vérifier la répartition des données générées (`GROUP BY` + `count(*)`) avant de mesurer quoi que ce soit.
+
+---
+
+## 10. Règles d'or
 
 1. **Mesure toujours avant d'optimiser** (`EXPLAIN ANALYZE`, pas d'intuition).
 2. **Un seul changement à la fois**, sinon tu ne sais pas ce qui a marché.

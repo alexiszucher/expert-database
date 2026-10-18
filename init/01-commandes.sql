@@ -7,7 +7,7 @@ SELECT
   (random() * 100000)::int AS client_id,
   now() - (random() * interval '730 days') AS date_commande,
   (random() * 500)::numeric(10,2) AS montant,
-  (ARRAY['nouvelle','payee','expediee','annulee'])[1 + (random()*3)::int] AS statut
+  (ARRAY['nouvelle','payee','expediee','annulee'])[1 + floor(random()*4)::int] AS statut
 FROM generate_series(1, 5000000) g;
 
 ANALYZE commandes;
