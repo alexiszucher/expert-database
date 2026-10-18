@@ -175,7 +175,7 @@ Un dossier par jour (`JOUR1/`, `JOUR2/`, …) avec la phrase du carnet.
 
 ### Semaine 1
 
-- [x] **Jour 1** : mise en place (Docker + 5 M de lignes), ordre logique d'exécution d'un `SELECT` → [`JOUR1/phrase-du-jour.md`](JOUR1/phrase-du-jour.md)
+- [x] **Jour 1** : mise en place (Docker + 5 M de lignes), ordre logique d'exécution d'un `SELECT`
 - [ ] **Jour 2**
 - [ ] **Jour 3**
 - [ ] **Jour 4**
