@@ -176,9 +176,9 @@ Un dossier par jour (`JOUR1/`, `JOUR2/`, …) avec la phrase du carnet.
 ### Semaine 1
 
 - [x] **Jour 1** : mise en place (Docker + 5 M de lignes), ordre logique d'exécution d'un `SELECT`
-- [ ] **Jour 2**
-- [ ] **Jour 3**
-- [ ] **Jour 4**
+- [x] **Jour 2** : logique du `NULL` (logique à 3 valeurs), `IS DISTINCT FROM`
+- [x] **Jour 3** : tri (`ORDER BY`), place des `NULL` (`NULLS FIRST` / `NULLS LAST`)
+- [x] **Jour 4** : `DISTINCT`, `count(DISTINCT)`, `DISTINCT ON`, premier tri lu dans un `EXPLAIN ANALYZE` (`work_mem`)
 - [ ] **Jour 5**
 - [ ] **Samedi** : quiz + mini-défi
 
@@ -202,6 +202,36 @@ FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → 
 - **Prédicat sargable (aperçu de la S9)** : `WHERE montant > 500 / 1.2` laisse la colonne « nue » et permet un index, contrairement à `WHERE montant * 1.2 > 500`.
 - **`::int` arrondit, il ne tronque pas** (`0.5::int` donne 1). Pour tirer un entier uniforme entre 0 et N-1 : `floor(random() * N)::int`. Avec `(random() * N)::int`, les valeurs extrêmes sortent deux fois moins souvent.
 - **Un jeu de test biaisé donne des conclusions biaisées** : vérifier la répartition des données générées (`GROUP BY` + `count(*)`) avant de mesurer quoi que ce soit.
+
+### Jour 2 : logique du `NULL`
+
+- **Logique à 3 valeurs** : une comparaison avec `NULL` donne `UNKNOWN`, et `WHERE` ne garde que `TRUE`. `statut <> 'payee'` (ou `!=`) exclut donc silencieusement les lignes où `statut` est `NULL`.
+- **`IS DISTINCT FROM`** traite `NULL` comme une valeur comparable : `statut IS DISTINCT FROM 'payee'` inclut les `NULL`.
+- **Contrôle de cohérence** : `count(= 'payee') + count(IS DISTINCT FROM 'payee')` doit redonner le total de la table. Avec `<>`, il manque les `NULL`.
+- **On cherche un `NULL` avec `IS NULL`**, jamais `= NULL` (toujours `UNKNOWN`, donc zéro ligne).
+
+### Jour 3 : tri et place des `NULL`
+
+- **Pour PostgreSQL, `NULL` est plus grand que toute valeur** : `ORDER BY x` (ASC) les met à la fin, `ORDER BY x DESC` les met en premier.
+- **Piège du Top-N** : `ORDER BY montant DESC LIMIT 3` renvoie des `NULL` au lieu des plus grosses commandes. Corriger avec `NULLS LAST` ou en filtrant `WHERE montant IS NOT NULL`.
+- **Aperçu de la S7** : un index ne sert un tri que si son ordre correspond, y compris la place des `NULL` (index `(montant DESC NULLS LAST)` pour ce Top-N).
+
+### Jour 4 : `DISTINCT`, `DISTINCT ON` et premier tri mesuré
+
+- **Rappel du Jour 3 inversé** : `ORDER BY montant` (ASC) met déjà les `NULL` en dernier, `NULLS LAST` n'y change rien. Le défaut dépend du moteur : PostgreSQL et Oracle mettent les `NULL` en dernier en ASC, MySQL et SQL Server en premier. Écrire `NULLS FIRST` / `NULLS LAST` explicitement dès que ça compte.
+- **`SELECT DISTINCT` porte sur la ligne entière** : `DISTINCT client_id, date_commande, montant` ne donne pas une ligne par client, mais une ligne par trio (soit presque les 5 M de lignes).
+- **`DISTINCT(client_id)` n'est pas une fonction** : les parenthèses entourent juste une expression, la requête est identique à la précédente. Il manque le mot-clé `ON`.
+- **`DISTINCT` garde les `NULL` en une seule ligne, `count(DISTINCT x)` les ignore** (5 lignes contre un compte de 4 sur `statut`).
+- **Tous les agrégats ignorent les `NULL`, sauf `count(*)`** : `avg(montant)` est la moyenne des seuls montants renseignés. Si `NULL` veut dire 0, écrire `avg(coalesce(montant, 0))`.
+- **Compter les distincts en incluant le `NULL`** : `count(DISTINCT coalesce(statut, 'inconnu'))` marche, mais se trompe en silence si `'inconnu'` existe déjà dans les données. Plus sûr : `SELECT count(*) FROM (SELECT DISTINCT statut ...) t`.
+- **`IS DISTINCT FROM` n'utilise pas d'index B-tree** : sur une grosse table, préférer `statut <> 'x' OR statut IS NULL`. Son contraire, `IS NOT DISTINCT FROM`, est un `=` qui accepte les `NULL` (utile en jointure, S2).
+- **`DISTINCT ON (col)` garde la première ligne de chaque groupe selon le `ORDER BY`**, qui doit commencer par `col`. Penser au `NULLS LAST` sur la colonne qui choisit la ligne, et ajouter une colonne de départage (`id DESC`) pour un résultat stable.
+- **`SELECT DISTINCT statut ... ORDER BY montant` est une erreur** : après le `DISTINCT`, une ligne regroupe 1,25 M de montants, impossible de choisir lequel trier. Passer par `GROUP BY statut` + `max(montant)`.
+- **`DISTINCT ON` trie toute la table** pour n'en garder que quelques lignes. Un `GROUP BY` + agrégat peut s'en passer (`HashAggregate`).
+- **Lire `actual time=A..B`** : A = première ligne renvoyée, B = dernière, en ms depuis le début. Les temps sont cumulés avec les enfants : temps propre d'un nœud = son B moins le B de son enfant. Un `Sort` est bloquant (A élevé). Si `loops > 1`, le temps est une moyenne par boucle.
+- **`rows` dans `cost=...` est une estimation, `rows` dans `actual` est le réel** (98 929 estimés contre 100 001 clients réels).
+- **`Sort Method: external merge`** : le tri dépasse `work_mem` (4 Mo par défaut) et passe par des fichiers temporaires. En mémoire, le même tri prend environ 2,3 fois sa taille sur disque (429 Mo contre 184 Mo). Avec `work_mem = 1GB`, le quicksort ne gagnait que 200 ms sur 3,3 s : les fichiers temporaires restaient dans le cache du système. `external merge` est un signal, pas une preuve. La vraie solution est un index qui fournit les lignes déjà triées (S7), pas de la RAM (`work_mem` s'applique par tri et par connexion, S20).
+- **`SET` ne vaut que pour la session** : un `SET work_mem` lancé dans une autre connexion que la requête n'a aucun effet. Vérifier avec `SHOW work_mem`.
 
 ---
 
