@@ -179,7 +179,7 @@ Un dossier par jour (`JOUR1/`, `JOUR2/`, …) avec la phrase du carnet.
 - [x] **Jour 2** : logique du `NULL` (logique à 3 valeurs), `IS DISTINCT FROM`
 - [x] **Jour 3** : tri (`ORDER BY`), place des `NULL` (`NULLS FIRST` / `NULLS LAST`)
 - [x] **Jour 4** : `DISTINCT`, `count(DISTINCT)`, `DISTINCT ON`, premier tri lu dans un `EXPLAIN ANALYZE` (`work_mem`)
-- [ ] **Jour 5**
+- [x] **Jour 5** : filtres sur plages de dates (`BETWEEN` vs intervalle semi-ouvert), `timestamptz` et fuseau de la session
 - [ ] **Samedi** : quiz + mini-défi
 
 ---
@@ -232,6 +232,20 @@ FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → 
 - **`rows` dans `cost=...` est une estimation, `rows` dans `actual` est le réel** (98 929 estimés contre 100 001 clients réels).
 - **`Sort Method: external merge`** : le tri dépasse `work_mem` (4 Mo par défaut) et passe par des fichiers temporaires. En mémoire, le même tri prend environ 2,3 fois sa taille sur disque (429 Mo contre 184 Mo). Avec `work_mem = 1GB`, le quicksort ne gagnait que 200 ms sur 3,3 s : les fichiers temporaires restaient dans le cache du système. `external merge` est un signal, pas une preuve. La vraie solution est un index qui fournit les lignes déjà triées (S7), pas de la RAM (`work_mem` s'applique par tri et par connexion, S20).
 - **`SET` ne vaut que pour la session** : un `SET work_mem` lancé dans une autre connexion que la requête n'a aucun effet. Vérifier avec `SHOW work_mem`.
+
+### Jour 5 : filtrer sur une plage de dates
+
+- **Rappel du Jour 4, temps propre** : le A d'un `Sort` est élevé parce qu'il est bloquant, mais son temps propre se calcule toujours avec B (3 117 − 318 ≈ 2,8 s). Un `LIMIT` au-dessus d'un `Sort` gagne peu : le `top-N heapsort` ne garde que N lignes en mémoire mais lit toute la table. Seul un index trié supprime le `Sort` (S7, S11).
+- **Rappel du Jour 4, `DISTINCT ON`** : le `ORDER BY` doit commencer par la colonne du `DISTINCT ON`, sinon erreur. Sans aucun `ORDER BY`, la requête passe mais la ligne gardée est arbitraire. Pour trier le résultat autrement, `DISTINCT ON` dans une sous-requête puis un nouvel `ORDER BY` à l'extérieur.
+- **`BETWEEN` inclut ses deux bornes** et `'2025-03-31'` vaut `2025-03-31 00:00:00` sur un `timestamp` : `BETWEEN '2025-03-01' AND '2025-03-31'` rate tout le 31 mars après minuit (205 713 contre 212 516, écart de 6 803).
+- **`BETWEEN ... AND '2025-04-01'` ne corrige rien** : il compte le 1er avril à minuit pile dans mars. Même chiffre sur la base de test par chance (`random()` produit des microsecondes), mais avec des dates sans heure (`date_trunc('day', ...)`) c'est toute la journée du 1er avril qui passe dans mars (6 897 lignes de trop). Additionner des mois ainsi compte ces lignes deux fois.
+- **Règle : intervalle semi-ouvert `[début, fin[`** : `>= '2025-03-01' AND < '2025-04-01'`. Ni trou ni recouvrement, quelle que soit la précision de la colonne (`23:59:59` rate les microsecondes).
+- **Prouver un écart au chiffre près** : les lignes ratées par `BETWEEN` sont `> '2025-03-31' AND < '2025-04-01'`, pas `>=` (minuit pile était déjà compté). Toujours se demander si chaque borne est incluse.
+- **`date_commande::date = '2025-03-31'` n'est pas sargable** (Jour 2) : même résultat que l'intervalle, mais l'index sur `date_commande` ne sert plus.
+- **Index sur `timestamptz::date` refusé** : `functions in index expression must be marked IMMUTABLE`, car le jour d'un instant dépend du fuseau. Il faut `(date_commande AT TIME ZONE 'Europe/Paris')::date`, écrit pareil dans le `WHERE` (S7). L'intervalle sur la colonne nue reste plus simple.
+- **Un littéral sans fuseau est lu dans le fuseau de la session** : après `SET timezone = 'Europe/Paris'`, le même filtre de mars donne 212 277 au lieu de 212 516. Les données n'ont pas bougé, un `timestamptz` est un instant absolu.
+- **L'offset change dans le mois** : mars à Paris va de 28 février 23:00 UTC (+1) à 31 mars 22:00 UTC (+2), soit 30 jours 23 h. Jamais de « +1 h » en dur.
+- **Stocker en UTC, filtrer dans le fuseau de la question métier** : écrire `'2025-03-01 Europe/Paris'` dans les bornes, ou convertir les bornes côté application et les envoyer avec le `Z` (`'2025-02-28T23:00:00Z'`). Sans `Z`, la session relit l'heure dans son propre fuseau.
 
 ---
 
