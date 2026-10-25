@@ -180,7 +180,7 @@ Un dossier par jour (`JOUR1/`, `JOUR2/`, …) avec la phrase du carnet.
 - [x] **Jour 3** : tri (`ORDER BY`), place des `NULL` (`NULLS FIRST` / `NULLS LAST`)
 - [x] **Jour 4** : `DISTINCT`, `count(DISTINCT)`, `DISTINCT ON`, premier tri lu dans un `EXPLAIN ANALYZE` (`work_mem`)
 - [x] **Jour 5** : filtres sur plages de dates (`BETWEEN` vs intervalle semi-ouvert), `timestamptz` et fuseau de la session
-- [ ] **Samedi** : quiz + mini-défi
+- [x] **Samedi** : quiz + mini-défi (plus grosse commande non annulée par client en mars à Paris, `DISTINCT ON` en sous-requête, lecture d'un plan parallèle)
 
 ---
 
@@ -246,6 +246,23 @@ FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → 
 - **Un littéral sans fuseau est lu dans le fuseau de la session** : après `SET timezone = 'Europe/Paris'`, le même filtre de mars donne 212 277 au lieu de 212 516. Les données n'ont pas bougé, un `timestamptz` est un instant absolu.
 - **L'offset change dans le mois** : mars à Paris va de 28 février 23:00 UTC (+1) à 31 mars 22:00 UTC (+2), soit 30 jours 23 h. Jamais de « +1 h » en dur.
 - **Stocker en UTC, filtrer dans le fuseau de la question métier** : écrire `'2025-03-01 Europe/Paris'` dans les bornes, ou convertir les bornes côté application et les envoyer avec le `Z` (`'2025-02-28T23:00:00Z'`). Sans `Z`, la session relit l'heure dans son propre fuseau.
+
+### Samedi (semaine 1) : quiz + mini-défi
+
+- **Un agrégat est interdit dans `WHERE`**, même répété (`aggregate functions are not allowed in WHERE`) : les groupes n'existent pas encore. Filtrer dans `HAVING`, ou dans une sous-requête / CTE.
+- **`AND` passe avant `OR`** : `statut <> 'annulee' OR statut IS NULL AND date ...` applique le filtre de dates aux seuls `NULL`, et renvoie 3 771 539 lignes pour un mois (toutes les non-annulées de la table + 21 311 `NULL` de mars). Toujours des parenthèses autour d'un `OR`.
+- **Vérifier l'ordre de grandeur avant tout** : 5 M sur 24 mois font environ 210 000 par mois. Un chiffre 18 fois trop gros, ou deux requêtes différentes qui donnent le même chiffre, signalent un bug.
+- **Mars non annulé à Paris = 180 548**, contre 180 764 en UTC (216 commandes déplacées) et 159 453 avec `<>` + `BETWEEN` (les 21 311 `NULL` perdus ; le minuit pile du 1er avril ne pesait aucune ligne).
+- **`23:59:59` rate les microsecondes**, et sur la base de test il y a 0 ligne dans cette seconde : le bug est invisible en test. Il oblige aussi à connaître le dernier jour du mois.
+- **`LIMIT` sur des ex aequo = résultat instable** : 50 commandes à 0.00, `ORDER BY montant LIMIT 5` en prend 5 au hasard. Terminer le `ORDER BY` par une colonne unique (`id`).
+- **`MAX` donne une valeur, pas la ligne d'où elle vient** : `GROUP BY client_id, id, ...` groupe par commande (`id` unique), `MAX` ne fait rien et on obtient le top des commandes, pas des clients. Bon par chance ici (aucun client n'a deux commandes ≥ 499,50 €), faux dès qu'un client en a deux : vérifié avec une ligne de test.
+- **« Une ligne entière par groupe, puis un classement » = deux tris** : `DISTINCT ON (client_id) ... ORDER BY client_id, montant DESC NULLS LAST, id` dans une sous-requête, puis `ORDER BY montant DESC NULLS LAST, id LIMIT 5` dehors. Ce n'est pas un doublon : l'ordre d'une sous-requête n'est jamais garanti dans la requête extérieure. Le `NULLS LAST` est requis aux deux niveaux (1 548 clients n'ont que des montants `NULL`).
+- **Un message d'erreur pointe souvent le mot qui suit la faute** : `FROM (DISTINCT ON ...` signale `ON`, alors qu'il manque `SELECT`.
+- **Afficher à l'heure de Paris** : `date_commande AT TIME ZONE 'Europe/Paris'` renvoie un `timestamp` sans fuseau (l'heure murale). Dans le `SELECT` seulement ; le `WHERE` garde la colonne nue et met le fuseau dans les bornes.
+- **Une CTE utilisée une fois est inlinée depuis PostgreSQL 12** : même plan, même temps qu'une sous-requête. `AS MATERIALIZED` force le calcul à part (`CTE Scan`), à évaluer en S10.
+- **Le `Filter` d'un plan montre les bornes converties** (`'2025-02-28 23:00:00+00'`) : la conversion de fuseau est faite une fois sur les bornes, le prédicat reste sargable.
+- **Rappel du Jour 4, A n'est pas une durée** : le `Subquery Scan` à `141..202` ne « dure » pas 61 ms et n'est pas le plus coûteux ; il ne fait que passer les lignes (≈ 19 ms propres). Le coupable est le nœud sans enfant : le `Seq Scan` (≈ 82-96 ms), qui lit toute la table pour en garder 3,6 %.
+- **Plan parallèle (`Workers Launched: 2` → `loops=3`)** : chaque chiffre est une moyenne par processus. On multiplie **les lignes** par `loops` (60 183 × 3 = 180 549 gardées, 1 606 484 × 3 = 4 819 452 jetées), **pas le temps** : les processus tournent en même temps. On multiplie le temps seulement pour des boucles successives (`Nested Loop`, S8).
 
 ---
 
