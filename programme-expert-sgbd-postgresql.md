@@ -182,6 +182,15 @@ Un dossier par jour (`JOUR1/`, `JOUR2/`, …) avec la phrase du carnet.
 - [x] **Jour 5** : filtres sur plages de dates (`BETWEEN` vs intervalle semi-ouvert), `timestamptz` et fuseau de la session
 - [x] **Samedi** : quiz + mini-défi (plus grosse commande non annulée par client en mars à Paris, `DISTINCT ON` en sous-requête, lecture d'un plan parallèle)
 
+### Semaine 2
+
+- [x] **Jour 6** : table `clients`, `LEFT JOIN` et anti-jointure, filtre dans `ON` ou dans `WHERE`, `count(*)` vs `count(col)`
+- [ ] **Jour 7**
+- [ ] **Jour 8**
+- [ ] **Jour 9**
+- [ ] **Jour 10**
+- [ ] **Samedi** : quiz + mini-défi
+
 ---
 
 ## 9. Notions avancées (au fil des jours)
@@ -263,6 +272,20 @@ FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → 
 - **Le `Filter` d'un plan montre les bornes converties** (`'2025-02-28 23:00:00+00'`) : la conversion de fuseau est faite une fois sur les bornes, le prédicat reste sargable.
 - **Rappel du Jour 4, A n'est pas une durée** : le `Subquery Scan` à `141..202` ne « dure » pas 61 ms et n'est pas le plus coûteux ; il ne fait que passer les lignes (≈ 19 ms propres). Le coupable est le nœud sans enfant : le `Seq Scan` (≈ 82-96 ms), qui lit toute la table pour en garder 3,6 %.
 - **Plan parallèle (`Workers Launched: 2` → `loops=3`)** : chaque chiffre est une moyenne par processus. On multiplie **les lignes** par `loops` (60 183 × 3 = 180 549 gardées, 1 606 484 × 3 = 4 819 452 jetées), **pas le temps** : les processus tournent en même temps. On multiplie le temps seulement pour des boucles successives (`Nested Loop`, S8).
+
+### Jour 6 : `LEFT JOIN`, filtre dans `ON` ou dans `WHERE`
+
+- **Rappel de samedi, unités et `loops`** : `actual time` est en **millisecondes** (82 ms, pas 82 s : un facteur 1 000 en diagnostic). En parallèle, `rows=60183 loops=3` fait 180 549 lignes, mais le temps ne se multiplie pas.
+- **Ex aequo : ordre non défini, pas aléatoire** : PostgreSQL rend les ex aequo dans l'ordre où son plan les croise (disque, workers, `top-N heapsort` non stable). Stable 100 fois en test, différent en production.
+- **La base ne garantit que ce que ses contraintes imposent** : « un client a forcément une commande » est une hypothèse métier, fausse ici (20 000 clients sans commande, 23 commandes sans client, aucune clé étrangère). Regarder les données (`min`, `max`, `count(DISTINCT)`) avant d'estimer.
+- **Un `GROUP BY` sur `commandes` ne voit jamais les clients sans commande** : ils n'y ont aucune ligne. Pour les voir, partir de `clients`.
+- **Anti-jointure** : `LEFT JOIN ... WHERE droite.col IS NULL`. Tester la clé de jointure ou une colonne `NOT NULL` : `commandes_null.id` (sans `NOT NULL`) donnait le bon chiffre mais un `Hash Right Join` + `Filter` ; `client_id IS NULL` donne un `Hash Right Anti Join`, qui s'arrête au premier partenaire trouvé.
+- **Prédire un chiffre avant de le vérifier** : le client 0 ne sort que pour `[0 ; 0,5[` (arrondi de `::int`, Jour 1), soit 5 M × 0,5 / 100 000 = 25 attendues, 23 trouvées. Même chose pour 100 000 (23 commandes, mais ce client existe). Un `GROUP BY` sur les orphelines prouve qu'elles sont toutes à 0 ; un `ORDER BY` sur 5 M de lignes lu à l'œil ne prouve rien.
+- **`LEFT JOIN` garde la table de gauche** : `cte LEFT JOIN clients` ne gardait que les 27 107 clients ayant une annulation. Sens inversé = résultat d'un `INNER JOIN`, sans erreur.
+- **Filtre sur la table de droite dans le `WHERE` = `LEFT JOIN` annulé** : la ligne complétée a `statut = NULL`, `NULL = 'annulee'` donne `UNKNOWN`, et le `WHERE` la jette (Jour 2). Dans le `ON`, le filtre choisit les commandes associées et tous les clients restent.
+- **`count(*)` donne 1 à un client sans partenaire** : il garde une ligne remplie de `NULL`. `count(commandes_null.id)` donne 0. Avec le filtre dans le `ON` et `count(*)` : 120 000 lignes, mais 115 883 clients à 1 et aucun à 0. Choisir selon ce qu'on compte : des lignes (`count(*)`, les orphelines) ou des valeurs (`count(col)`, les commandes).
+- **Regrouper d'abord, joindre ensuite** : CTE agrégée puis `clients LEFT JOIN cte` + `coalesce(nb, 0)`. Le filtre est enfermé dans la CTE et ne peut pas casser la jointure. Même résultat (120 000 lignes, 92 893 à 0), plans à comparer en S8.
+- **Toujours lancer et contrôler** : `count(*)` et `min()` autour du résultat (`120 000 / 0`), plus un total qui se recoupe (27 107 + 92 893 = 120 000). Une requête décrite sans résultat cache ses bugs.
 
 ---
 
